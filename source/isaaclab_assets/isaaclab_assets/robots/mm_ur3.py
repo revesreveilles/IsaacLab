@@ -24,9 +24,9 @@ from isaaclab.assets.articulation import ArticulationCfg
 MOBILE_MANIPULATOR_CFG = ArticulationCfg(
     # Spawn from a USD with the expected joint names.
     spawn=sim_utils.UsdFileCfg(
-        usd_path="/home/revesreveilles/Isaac_lab_ws/data/Robots/mobile_manipulator/mm_ur3.usd",
+        usd_path="/home/revesreveilles/Isaac_lab_ws/data/Robots/mobile_manipulator/mm_ur3/mm_ur3.usd",
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(enabled_self_collisions=True),
-        activate_contact_sensors=False,
+        activate_contact_sensors=True,
     ),
     # Initial joint states
     init_state=ArticulationCfg.InitialStateCfg(
@@ -38,8 +38,8 @@ MOBILE_MANIPULATOR_CFG = ArticulationCfg(
             "left_back_pivot_joint": 0.0,
             "right_back_pivot_joint": 0.0,
             # UR arm (position control)
-            "ur_shoulder_pan_joint": 1.712,
-            "ur_shoulder_lift_joint": -1.712,
+            "ur_shoulder_pan_joint": 1.57,
+            "ur_shoulder_lift_joint": -1.57,
             "ur_elbow_joint": 0.0,
             "ur_wrist_1_joint": 0.0,
             "ur_wrist_2_joint": 0.0,
@@ -53,25 +53,25 @@ MOBILE_MANIPULATOR_CFG = ArticulationCfg(
         # Drive type: force
         "left_forward_pivot": ImplicitActuatorCfg(
             joint_names_expr=["left_forward_pivot_joint"],
-            effort_limit_sim=5.0,
+            effort_limit_sim=100.0,
             stiffness=1377.16003,
             damping=0.55086,
         ),
         "left_back_pivot": ImplicitActuatorCfg(
             joint_names_expr=["left_back_pivot_joint"],
-            effort_limit_sim=5.0,
+            effort_limit_sim=100.0,
             stiffness=253.95029,
             damping=0.10158,
         ),
         "right_forward_pivot": ImplicitActuatorCfg(
             joint_names_expr=["right_forward_pivot_joint"],
-            effort_limit_sim=5.0,
+            effort_limit_sim=100.0,
             stiffness=1753.51636,
             damping=0.70141,
         ),
         "right_back_pivot": ImplicitActuatorCfg(
             joint_names_expr=["right_back_pivot_joint"],
-            effort_limit_sim=5.0,
+            effort_limit_sim=100.0,
             stiffness=717.0954,
             damping=0.28684,
         ),

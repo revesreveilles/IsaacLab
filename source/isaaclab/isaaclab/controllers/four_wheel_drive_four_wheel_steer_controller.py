@@ -50,10 +50,9 @@ class FourWheelDriveFourWheelSteerController:
         track_width: float,
         wheel_radii: Sequence[float],
         wheel_positions: Optional[Sequence[Sequence[float]]] = None,
-        max_wheel_velocity: float = 0.0,
+        max_linear_velocity: float = 0.0,
+        max_angular_velocity: float = 0.0,
         max_steering_angle: float = np.pi,
-        max_acceleration: float = 0.0,  # not used in lightweight impl
-        max_steering_velocity: float = 0.0,
     ) -> None:
         self._name = name
         self._wheel_base = float(wheel_base)
@@ -81,10 +80,9 @@ class FourWheelDriveFourWheelSteerController:
             )
 
         # limits (0.0 interpreted as infinity where applicable)
-        self._max_wheel_velocity = float(max_wheel_velocity)
+        self._max_linear_velocity = float(max_linear_velocity)
+        self._max_angular_velocity = float(max_angular_velocity)
         self._max_steering_angle = float(max_steering_angle)
-        self._max_acceleration = float(max_acceleration)
-        self._max_steering_velocity = float(max_steering_velocity)
 
     def forward(self, command) -> _FWDSAction:
         """Compute wheel velocities and steering angles for 4WD4WS given body/world twist.
@@ -119,20 +117,31 @@ class FourWheelDriveFourWheelSteerController:
         else:
             w = np.asarray([0.0, 0.0, float(ang)], dtype=float)
 
-        # interpret zeros as infinity for limits to match common Isaac conventions
-        max_wheel_vel = np.inf if self._max_wheel_velocity == 0.0 else self._max_wheel_velocity
-        max_steer_ang = np.inf if self._max_steering_angle == 0.0 else self._max_steering_angle
-        max_steer_vel = np.inf if self._max_steering_velocity == 0.0 else self._max_steering_velocity
+        # interpret zeros as infinity for limits
+        max_lin_vel = (
+            np.inf
+            if self._max_linear_velocity == 0.0
+            else self._max_linear_velocity
+        )
+        max_ang_vel = (
+            np.inf
+            if self._max_angular_velocity == 0.0
+            else self._max_angular_velocity
+        )
+        max_steer_ang = (
+            np.inf
+            if self._max_steering_angle == 0.0
+            else self._max_steering_angle
+        )
 
-        # clamp angular z to steering velocity limit
-        w[2] = float(np.clip(w[2], -max_steer_vel, max_steer_vel))
-
-        # compute max linear speed from mean wheel radius
-        max_linear_speed = float(abs(max_wheel_vel * self._wheel_radius))
+        # apply input command limits
         lin_speed = float(np.linalg.norm(v[:2]))
-        if lin_speed > max_linear_speed and max_linear_speed > 0.0 and not np.isinf(max_linear_speed):
-            scale = max_linear_speed / lin_speed
+        if lin_speed > max_lin_vel and not np.isinf(max_lin_vel):
+            scale = max_lin_vel / lin_speed
             v[:2] *= scale
+
+        # clamp angular velocity
+        w[2] = float(np.clip(w[2], -max_ang_vel, max_ang_vel))
 
         # rotate world-frame velocity to body frame using R(-yaw)
         cy = np.cos(-yaw)
@@ -161,13 +170,21 @@ class FourWheelDriveFourWheelSteerController:
                 # negative sign matches adapter's convention (Isaac Sim)
                 steer_ang[i] = -float(np.arctan2(vel[1], vel[0]))
 
-        # apply limits
-        if not np.isinf(max_wheel_vel):
-            wheel_vel = np.clip(wheel_vel, -max_wheel_vel, max_wheel_vel)
+        # apply steering angle limits
         if not np.isinf(max_steer_ang):
             steer_ang = np.clip(steer_ang, -max_steer_ang, max_steer_ang)
 
         return _FWDSAction(
-            joint_velocities=(wheel_vel[0], wheel_vel[1], wheel_vel[2], wheel_vel[3]),
-            joint_positions=(steer_ang[0], steer_ang[1], steer_ang[2], steer_ang[3]),
+            joint_velocities=(
+                wheel_vel[0],
+                wheel_vel[1],
+                wheel_vel[2],
+                wheel_vel[3],
+            ),
+            joint_positions=(
+                steer_ang[0],
+                steer_ang[1],
+                steer_ang[2],
+                steer_ang[3],
+            ),
         )

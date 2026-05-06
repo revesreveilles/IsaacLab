@@ -102,7 +102,7 @@ class FourWheelFourSteerAction(ActionTerm):
             wheelbase=float(self.cfg.wheelbase),
             track_width=float(self.cfg.track_width),
             wheel_radii=tuple(self.cfg.wheel_radii) if self.cfg.wheel_radii is not None else (0.1, 0.1, 0.1, 0.1),
-            max_linear_velocity=self.cfg.max_linear_velocity if self.cfg.max_linear_velocity > 0 else 50.0,
+            max_linear_velocity=self.cfg.max_linear_velocity if self.cfg.max_linear_velocity > 0 else 5.0,
             max_angular_velocity=self.cfg.max_angular_velocity if self.cfg.max_angular_velocity > 0 else 10.0,
             max_steering_angle=self.cfg.max_steering_angle if self.cfg.max_steering_angle > 0 else 1.57,
         )
@@ -115,7 +115,16 @@ class FourWheelFourSteerAction(ActionTerm):
         )
 
         # parse scale/offset params (tuple of 3 floats)
-        self._scale = torch.tensor(self.cfg.scale, device=self.device).view(1, 3)
+        vel_scale = torch.tensor(
+            [
+                self.cfg.max_linear_velocity, 
+                self.cfg.max_linear_velocity, 
+                self.cfg.max_angular_velocity
+            ],
+            device=self.device,
+        ).view(1, 3)
+        user_scale = torch.tensor(self.cfg.scale, device=self.device).view(1, 3)
+        self._scale = user_scale * vel_scale
         self._offset = torch.tensor(self.cfg.offset, device=self.device).view(1, 3)
 
         omni.log.info(
@@ -167,8 +176,9 @@ class FourWheelFourSteerAction(ActionTerm):
 
     def process_actions(self, actions: torch.Tensor):
         """Process raw actions with scale and offset."""
+        clamped_actions = torch.clamp(actions, min=-1.0, max=1.0)
         # store raw actions
-        self._raw_actions[:] = actions
+        self._raw_actions[:] = clamped_actions
         # affine transform: action = raw * scale + offset
         self._processed_actions = self._raw_actions * self._scale + self._offset
 
@@ -181,11 +191,17 @@ class FourWheelFourSteerAction(ActionTerm):
         )
 
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
-        """Reset actions for specified environments."""
+        """Reset actions and controller state for specified environments."""
         if env_ids is None:
             self._raw_actions[:] = 0.0
         else:
             self._raw_actions[env_ids] = 0.0
+        # Reset controller's swerve drive state (previous steering angles)
+        env_ids_t = None
+        if env_ids is not None:
+            env_ids_t = torch.tensor(env_ids, device=self._env.device, dtype=torch.long) \
+                if not isinstance(env_ids, torch.Tensor) else env_ids
+        self._controller.reset(env_ids_t)
 
     """
     Debug visualization.
@@ -262,18 +278,18 @@ class FourWheelFourSteerAction(ActionTerm):
             self.base_cmd_goal_visualizer.cfg.markers["arrow"].scale,
             device=self.device,
         )
-        
+
         # compute arrow scale based on velocity magnitude
         arrow_scale = default_scale.repeat(xy_velocity.shape[0], 1)
         arrow_scale[:, 0] *= torch.linalg.norm(xy_velocity, dim=1) * 3.0
-        
+
         # compute arrow orientation
         heading_angle = torch.atan2(xy_velocity[:, 1], xy_velocity[:, 0])
         zeros = torch.zeros_like(heading_angle)
         arrow_quat = math_utils.quat_from_euler_xyz(zeros, zeros, heading_angle)
-        
+
         # transform to world frame
         base_quat_w = self._asset.data.root_quat_w
         arrow_quat = math_utils.quat_mul(base_quat_w, arrow_quat)
-        
+
         return arrow_scale, arrow_quat

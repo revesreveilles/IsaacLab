@@ -24,7 +24,7 @@ from isaaclab.assets.articulation import ArticulationCfg
 MOBILE_MANIPULATOR_CFG = ArticulationCfg(
     # Spawn from a USD with the expected joint names.
     spawn=sim_utils.UsdFileCfg(
-        usd_path="/home/revesreveilles/Isaac_lab_ws/data/Robots/mobile_manipulator/mm_ur3/mm_ur3.usd",
+        usd_path="/home/revesreveilles/Isaac_lab_ws/data/Robots/mm_ur3/mm_ur3.usd",
         articulation_props=sim_utils.ArticulationRootPropertiesCfg(enabled_self_collisions=True),
         activate_contact_sensors=True,
     ),
@@ -78,7 +78,7 @@ MOBILE_MANIPULATOR_CFG = ArticulationCfg(
         # Base wheel drives: velocity-controlled; keep stiffness 0 to avoid position pulling.
         "base_drives": ImplicitActuatorCfg(
             joint_names_expr=[r".*_drive_joint$"],
-            effort_limit_sim=50000.0,
+            effort_limit_sim=3402823466385288598117041834845.0,
             stiffness=1.0,
             damping=1000.0,         # viscous term for velocity servo behavior
         ),

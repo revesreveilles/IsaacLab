@@ -15,36 +15,6 @@ from . import agents
 # Register Gym environments.
 ##
 
-# Mobile manipulator: whole-body coordination for End-Effector tracking (Training)
-gym.register(
-    id="Isaac-MM-UR3-EeTracking-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": (
-            f"{__name__}.ee_tracking_env_cfg:MMEeTrackingEnvCfg"
-        ),
-        "rsl_rl_cfg_entry_point": (
-            f"{agents.__name__}.rsl_rl_ppo_cfg:MobileManipulatorPPORunnerCfg"
-        ),
-    },
-)
-
-# Mobile manipulator: whole-body coordination for End-Effector tracking (Play/Evaluation)
-gym.register(
-    id="Isaac-MM-UR3-EeTracking-Play-v0",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": (
-            f"{__name__}.ee_tracking_env_cfg:MMEeTrackingEnvCfg_PLAY"
-        ),
-        "rsl_rl_cfg_entry_point": (
-            f"{agents.__name__}.rsl_rl_ppo_cfg:MobileManipulatorPPORunnerCfg"
-        ),
-    },
-)
-
 # Mobile manipulator: EE trajectory tracking (Training)
 gym.register(
     id="Isaac-MM-UR3-EeTrajTracking-v0",

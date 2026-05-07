@@ -21,30 +21,36 @@ class MobileManipulatorPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """PPO runner configuration for mobile manipulator.
 
     Uses asymmetric actor-critic:
-    - Actor: 340-dim policy observations (deployable)
-    - Critic: 350-dim (policy + privileged observations)
+    - Actor: policy observations (deployable).
+      Dim varies with history and sensor config.
+    - Critic: policy + privileged observations.
 
     Note: RslRlVecEnvWrapper automatically detects observation groups
     from env.observation_manager and enables asymmetric training.
+    Observation dimensions are determined dynamically.
     """
 
     # ========== Runner Settings ==========
     num_steps_per_env = 24
     max_iterations = 10000
-    save_interval = 1000
+    save_interval = 500
     experiment_name = "mm_ee_tracking"
-    empirical_normalization = False
+    empirical_normalization = True
+    obs_groups = {
+        "policy": ["policy"],
+        "critic": ["policy", "critic"],
+    }
 
     # ========== Policy Network ==========
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,
 
-        # Actor network (uses policy observations: 340 dim)
-        actor_hidden_dims=[256, 128, 64],
+        # Actor network
+        actor_hidden_dims=[512, 256, 128],
         activation="elu",
 
-        # Critic network (uses policy + privileged: 350 dim)
-        critic_hidden_dims=[256, 256, 128],
+        # Critic network
+        critic_hidden_dims=[512, 256, 128],
     )
 
     # ========== PPO Algorithm ==========
@@ -66,12 +72,3 @@ class MobileManipulatorPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         desired_kl=0.01,
         max_grad_norm=1.0,
     )
-
-
-def __post_init__(self):
-    """Post initialization to set observation groups."""
-    if not hasattr(self.policy, 'obs_groups') or self.policy.obs_groups is None:
-        self.policy.obs_groups = {
-            "policy": ["policy"],           # Actor用env的"policy"组
-            "critic": ["policy", "critic"], # Critic用env的"policy"+"critic"组
-        }

@@ -12,3 +12,6 @@ from .commands import *  # noqa: F401, F403
 from .observations import *  # noqa: F401, F403
 from .rewards import *  # noqa: F401, F403
 from .terminations import *  # noqa: F401, F403
+from .model import *  # noqa: F401, F403
+from .curriculum_events import *    # noqa: F401, F403
+from .dynamic_obstacle_buffers import *  # noqa: F401, F403

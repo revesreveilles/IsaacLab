@@ -7,7 +7,7 @@
 Mobile manipulator EE tracking task module.
 """
 
-from .config.ee_tracking_env_cfg import (
-    MMEeTrackingEnvCfg,
-    MMEeTrackingEnvCfg_PLAY,
+from .config.ee_traj_tracking_env_cfg import (
+    MMEeTrajTrackingEnvCfg,
+    MMEeTrajTrackingEnvCfg_PLAY,
 )

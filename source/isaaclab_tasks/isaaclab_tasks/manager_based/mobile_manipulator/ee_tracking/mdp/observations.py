@@ -385,10 +385,11 @@ def lidar_range_scan_flat(
     # ── Step-based cache: Policy → Critic 共享 ──
     cache_key = (
         id(env),
-        sensor_cfg_name,
-        asset_cfg_name,
+        sensor_cfg.name,
+        int(ray_subsample),
         float(ground_clearance),
-        float(max_clearance),
+        bool(normalize),
+        None if max_range is None else float(max_range),
     )
     step = env.common_step_counter
     cached = _lidar_scan_cache.get(cache_key)

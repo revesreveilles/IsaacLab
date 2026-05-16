@@ -64,6 +64,96 @@ def out_of_bounds(
     return dist > max_dist
 
 
+def static_obstacle_collision(
+    env: ManagerBasedRLEnv,
+    sensor_cfg: SceneEntityCfg = SceneEntityCfg("lidar"),
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    static_collision_margin: float = 0.05,
+    ground_clearance: float = 0.1,
+) -> torch.Tensor:
+    """Return True for environments where the robot collides with static obstacles.
+
+    Static collision is evaluated using collision-sphere-based clearance
+    against the static lidar point cloud. Points close to the ground below
+    ``ground_clearance`` are ignored consistently with the existing static
+    collision / reward implementation.
+
+    Args:
+        env: The environment.
+        sensor_cfg: LiDAR sensor SceneEntityCfg.
+        asset_cfg: Robot SceneEntityCfg.
+        static_collision_margin: Safety margin for static obstacles (m).
+            d_surface < margin -> collision. Default 0.05.
+        ground_clearance: Absolute z threshold for ground filtering (m).
+
+    Returns:
+        Boolean tensor [num_envs] indicating static collision.
+    """
+    from .observations import _compute_sphere_lidar
+
+    cache = _compute_sphere_lidar(
+        env,
+        sensor_cfg.name,
+        asset_cfg.name,
+        ground_clearance,
+    )
+    static_d_surface = cache["d_surface"]  # [E, S]
+    return (static_d_surface < static_collision_margin).any(dim=-1)
+
+
+def dynamic_obstacle_collision(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    dynamic_collision_margin: float = 0.05,
+    cuboid_names: tuple[str, ...] = DYN_CUBOID_NAMES,
+    cylinder_names: tuple[str, ...] = DYN_CYLINDER_NAMES,
+    cuboid_half_extents: tuple[
+        tuple[float, float, float], ...
+    ] = CUBOID_HALF_EXTENTS,
+    cylinder_params: tuple[
+        tuple[float, float], ...
+    ] = CYLINDER_PARAMS,
+) -> torch.Tensor:
+    """Terminate on analytical dynamic obstacle collision.
+
+    Dynamic collision is evaluated using the same collision-sphere and
+    analytical cuboid/cylinder signed-distance geometry used by the dynamic
+    obstacle rewards.
+
+    Args:
+        env: The environment.
+        asset_cfg: Robot SceneEntityCfg. Kept for DoneTerm interface symmetry.
+        dynamic_collision_margin: Safety margin for dynamic obstacles (m).
+            d_surface < margin -> collision. Default 0.05.
+        cuboid_names: Names of dynamic cuboid assets.
+        cylinder_names: Names of dynamic cylinder assets.
+        cuboid_half_extents: Half-extents per cuboid.
+        cylinder_params: (radius, half_height) per cylinder.
+
+    Returns:
+        Boolean tensor [num_envs] indicating dynamic collision.
+    """
+    from .observations import _compute_dynamic_obstacle_distances
+
+    del asset_cfg
+
+    device = env.device
+    num_envs = env.scene.num_envs
+
+    dyn_cache = _compute_dynamic_obstacle_distances(
+        env,
+        DYN_ALL_NAMES,
+        cuboid_names,
+        cylinder_names,
+        cuboid_half_extents,
+        cylinder_params,
+    )
+    if int(dyn_cache["n_total"]) == 0:
+        return torch.zeros(num_envs, device=device, dtype=torch.bool)
+
+    return (dyn_cache["per_sphere_min_dist"] < dynamic_collision_margin).any(dim=-1)
+
+
 def obstacle_collision(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("lidar"),
@@ -80,16 +170,10 @@ def obstacle_collision(
         tuple[float, float], ...
     ] = CYLINDER_PARAMS,
 ) -> torch.Tensor:
-    """Terminate on collision with static or dynamic obstacles.
+    """Terminate on any static or dynamic obstacle collision.
 
-    Collision check:
-      1. **Static**: Use collision spheres + LiDAR point cloud.
-         Collision when ``d_surface < static_collision_margin``.
-      2. **Dynamic**: Use collision spheres + analytical signed distance
-         to cuboids (point-to-AABB) and cylinders.
-         Collision when ``d_surface < dynamic_collision_margin``.
-
-    Either collision triggers termination for that environment.
+    This remains the training/curriculum collision key. Static and dynamic
+    collision terms are exposed separately only for logging/diagnostics.
 
     Args:
         env: The environment.
@@ -108,57 +192,53 @@ def obstacle_collision(
     Returns:
         Boolean tensor [num_envs] indicating collision.
     """
-    from .observations import _compute_sphere_lidar
-
-    device = env.device
-    num_envs = env.scene.num_envs
-
-    # ==================================================================
-    # 1. Static collision: collision spheres vs LiDAR point cloud
-    # ==================================================================
-    cache = _compute_sphere_lidar(
-        env, sensor_cfg.name, asset_cfg.name, ground_clearance,
-    )
-    static_d_surface = cache["d_surface"]  # [E, S]
-    # Any sphere closer than margin → collision
-    static_collision = (static_d_surface < static_collision_margin).any(dim=-1)  # [E]
-
-    from .observations import _compute_dynamic_obstacle_distances
-
-    dyn_cache = _compute_dynamic_obstacle_distances(
+    static_hit = static_obstacle_collision(
         env,
-        DYN_ALL_NAMES,
-        cuboid_names,
-        cylinder_names,
-        cuboid_half_extents,
-        cylinder_params,
+        sensor_cfg=sensor_cfg,
+        asset_cfg=asset_cfg,
+        static_collision_margin=static_collision_margin,
+        ground_clearance=ground_clearance,
     )
-    if int(dyn_cache["n_total"]) == 0:
-        dynamic_collision = torch.zeros(num_envs, device=device, dtype=torch.bool)
-    else:
-        dynamic_collision = (dyn_cache["per_sphere_min_dist"] < dynamic_collision_margin).any(dim=-1)
-    return static_collision | dynamic_collision
+    dynamic_hit = dynamic_obstacle_collision(
+        env,
+        asset_cfg=asset_cfg,
+        dynamic_collision_margin=dynamic_collision_margin,
+        cuboid_names=cuboid_names,
+        cylinder_names=cylinder_names,
+        cuboid_half_extents=cuboid_half_extents,
+        cylinder_params=cylinder_params,
+    )
+    return static_hit | dynamic_hit
 
 
 def proportional_time_out(
     env: ManagerBasedRLEnv,
     command_name: str = "ee_traj",
-    max_speed: float = 1.0,
-    safety_factor: float = 4.0,
+    nominal_speed: float = 1.0,
+    safety_factor: float = 2.0,
     min_timeout_s: float = 20.0,
 ) -> torch.Tensor:
-    """Per-env timeout proportional to the episode's route length.
+    """Terminate each environment with a path-length-proportional time budget.
 
-    timeout_s = max(min_timeout_s, safety_factor * path_length / max_speed)
-    max_steps = timeout_s / step_dt
+    The timeout budget is computed as
 
-    Returns a boolean tensor [num_envs] — True when the env has exceeded
-    its individual step budget.
+        timeout_s = max(min_timeout_s, safety_factor * path_length / nominal_speed)
+
+    where path_length is the total geometric length of the sampled
+    end-effector path. The resulting timeout is converted into simulation
+    steps using env.step_dt.
     """
     command_term = env.command_manager.get_term(command_name)
+
     path_length = command_term.metrics.get(
-        "path_total_length", command_term._path_total_length
-    )  # [N]
-    timeout_s = torch.clamp(safety_factor * path_length / max_speed, min=min_timeout_s)
-    max_steps = (timeout_s / env.step_dt).long()
+        "path_total_length",
+        command_term._path_total_length,
+    )  # [num_envs], meters
+
+    timeout_s = torch.clamp(
+        safety_factor * path_length / nominal_speed,
+        min=min_timeout_s,
+    )
+
+    max_steps = torch.ceil(timeout_s / env.step_dt).long()
     return env.episode_length_buf >= max_steps

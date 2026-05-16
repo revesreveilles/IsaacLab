@@ -66,39 +66,74 @@ def static_obstacles_terrain(
     y1 = (h - plat_px) // 2
     y2 = (h + plat_px) // 2
 
-    # ── 带最小间距约束的放置 ──
-    min_spacing_m = 1.6
-    spacing_px = int(min_spacing_m / cfg.horizontal_scale)
+    # ── 随机最小间距范围 ──
+    # spacing_range 表示每个障碍物独立采样的最小间距 (m)，
+    # 比固定 1.6m 更容易在高密度场景中放满，同时保留随机性。
+    spacing_low, spacing_high = cfg.obstacle_spacing_range
+    assert spacing_low > 0.0 and spacing_high >= spacing_low
 
-    occupied_mask = np.zeros((w, h), dtype=bool)
-    # 标记安全区 + 间距缓冲为已占用
-    safe_x1 = max(0, x1 - spacing_px)
-    safe_x2 = min(w, x2 + spacing_px)
-    safe_y1 = max(0, y1 - spacing_px)
-    safe_y2 = min(h, y2 + spacing_px)
-    occupied_mask[safe_x1:safe_x2, safe_y1:safe_y2] = True
+    # ── core + buffer 双 mask 放置 ──
+    # core_mask 只记录真实障碍物核心区域和中心安全出生区核心区域；
+    # buffer_mask 记录每个障碍物核心区按自身 spacing_m 膨胀后的禁入区。
+    #
+    # 接受条件：
+    #   1. 候选核心不能进入已有 buffer；
+    #   2. 候选 buffer 不能覆盖已有 core。
+    # 这样同时避免「候选障碍物进入已有障碍物 buffer」和
+    #「已有障碍物进入候选障碍物 buffer」。
+    core_mask = np.zeros((w, h), dtype=bool)
+    buffer_mask = np.zeros((w, h), dtype=bool)
+    core_mask[x1:x2, y1:y2] = True
 
+    # 高密度静态障碍物会频繁采样到冲突位置，需要比 n_obs * 10
+    # 更高的尝试上限，避免过早停止。
     placed_count = 0
-    max_attempts = n_obs * 10
+    attempts_used = 0
+    max_attempts = n_obs * cfg.max_place_attempts_per_obstacle
     for _ in range(max_attempts):
         if placed_count >= n_obs:
             break
+        attempts_used += 1
+
         bw = int(np.random.choice(obs_w_range))
         bl = int(np.random.choice(obs_l_range))
         bx = np.random.randint(0, w - bw + 1)
         by = np.random.randint(0, h - bl + 1)
-        if not np.any(occupied_mask[bx:bx + bw, by:by + bl]):
-            hf[bx:bx + bw, by:by + bl] = obs_h
-            occ_x1 = max(0, bx - spacing_px)
-            occ_x2 = min(w, bx + bw + spacing_px)
-            occ_y1 = max(0, by - spacing_px)
-            occ_y2 = min(h, by + bl + spacing_px)
-            occupied_mask[occ_x1:occ_x2, occ_y1:occ_y2] = True
-            placed_count += 1
+        spacing_m = np.random.uniform(spacing_low, spacing_high)
+        spacing_px = max(1, int(np.ceil(spacing_m / cfg.horizontal_scale)))
+
+        buf_x1 = max(0, bx - spacing_px)
+        buf_x2 = min(w, bx + bw + spacing_px)
+        buf_y1 = max(0, by - spacing_px)
+        buf_y2 = min(h, by + bl + spacing_px)
+
+        core_overlaps_buffer = np.any(
+            buffer_mask[bx:bx + bw, by:by + bl]
+        )
+        buffer_overlaps_core = np.any(
+            core_mask[buf_x1:buf_x2, buf_y1:buf_y2]
+        )
+        if core_overlaps_buffer or buffer_overlaps_core:
+            continue
+
+        hf[bx:bx + bw, by:by + bl] = obs_h
+        core_mask[bx:bx + bw, by:by + bl] = True
+        buffer_mask[buf_x1:buf_x2, buf_y1:buf_y2] = True
+        placed_count += 1
+
     if placed_count < n_obs:
         print(
-            f"Warning: Only placed {placed_count}/{n_obs}"
-            f" obstacles after {max_attempts} attempts."
+            "Warning: static obstacle placement only placed "
+            f"{placed_count}/{n_obs} obstacles after "
+            f"{attempts_used}/{max_attempts} attempts "
+            f"(spacing_range={cfg.obstacle_spacing_range})."
+        )
+    elif cfg.debug_obstacle_placement:
+        print(
+            "Static obstacle placement: placed "
+            f"{placed_count}/{n_obs} obstacles after "
+            f"{attempts_used}/{max_attempts} attempts "
+            f"(spacing_range={cfg.obstacle_spacing_range})."
         )
 
     # 确保中心安全区干净
@@ -125,6 +160,15 @@ class StaticObstaclesCfg(HfDiscreteObstaclesTerrainCfg):
     num_obstacles: int = 400
     """障碍物数量 (固定)。"""
 
+    obstacle_spacing_range: tuple[float, float] = (1.2, 1.6)
+    """随机采样的障碍物最小间距范围，单位 m。"""
+
+    max_place_attempts_per_obstacle: int = 80
+    """每个障碍物最大尝试次数，用于提升高密度场景下的成功放置率。"""
+
+    debug_obstacle_placement: bool = False
+    """是否打印静态障碍物放置统计信息。"""
+
 
 # ─────────────────────────────────────────────────────────
 #  Terrain generator config
@@ -134,11 +178,11 @@ class StaticObstaclesCfg(HfDiscreteObstaclesTerrainCfg):
 class MobileManipulatorTerrainCfg(TerrainGeneratorCfg):
     """单块地形配置（无课程学习）。
 
-    单一 45×45m 地形块，固定 350 个静态障碍物。
+    单一 50×50m 地形块，固定 300 个静态障碍物。
     所有机器人在同一块地形上训练。
 
     布局：
-      - 1 row × 1 col = 单块 45×45m 地形
+      - 1 row × 1 col = 单块 50×50m 地形
       - 中心 1×1m 安全出生区（无障碍物）
       - border_width=20m 外围平坦区域
       - border_height=0 与地面齐平
@@ -148,7 +192,7 @@ class MobileManipulatorTerrainCfg(TerrainGeneratorCfg):
     """
     num_rows: int = 1
     num_cols: int = 1
-    size: tuple[float, float] = (45.0, 45.0)
+    size: tuple[float, float] = (50.0, 50.0)
     border_width: float = 5.0
     border_height: float = 0.0
     curriculum: bool = False
@@ -159,9 +203,12 @@ class MobileManipulatorTerrainCfg(TerrainGeneratorCfg):
                 proportion=1.0,
                 obstacle_height=1.2,
                 obstacle_width_range=(0.4, 1.0),
-                obstacle_height_range=(1.2, 1.2),
+                obstacle_height_range=(1.2, 1.6),
                 obstacle_height_mode="fixed",
-                num_obstacles=350,
+                num_obstacles=300,
                 platform_width=0.5,
+                obstacle_spacing_range=(1.3, 1.6),
+                max_place_attempts_per_obstacle=80,
+                debug_obstacle_placement=True,
             ),
         }

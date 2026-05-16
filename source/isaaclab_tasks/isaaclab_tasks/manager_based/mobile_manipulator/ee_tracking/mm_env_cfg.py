@@ -377,7 +377,7 @@ class MobileManipulatorBaseEnvCfg(ManagerBasedRLEnvCfg):
 
     # Scene
     scene: MobileManipulatorSceneCfg = MobileManipulatorSceneCfg(
-        num_envs=4096,
+        num_envs=16384,
         env_spacing=2.5,
     )
 
@@ -389,10 +389,10 @@ class MobileManipulatorBaseEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self):
         """Post initialization - common settings."""
         # General settings
-        self.decimation = 4
+        self.decimation = 2
         self.episode_length_s = 40.0
         # Simulation settings
-        self.sim.dt = 0.005  # 200Hz
+        self.sim.dt = 0.008  # 100Hz
         self.sim.render_interval = self.decimation
         self.sim.physx.gpu_collision_stack_size = 2**27
 

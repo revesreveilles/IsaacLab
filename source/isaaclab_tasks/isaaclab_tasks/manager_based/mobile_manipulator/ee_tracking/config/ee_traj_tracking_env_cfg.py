@@ -60,7 +60,7 @@ class CommandsCfg:
             sample_uniform_orientation=False,
             arm_base_offset=(0.3, 0.0, 0.52),
             ranges_pos={
-                "rho_xy": (1.0, 7.0),
+                "rho_xy": (1.0, 10.0),
                 "yaw": (-1.0, 1.0),
             },
             z_range=(0.60, 0.80),
@@ -85,13 +85,12 @@ class CommandsCfg:
             preview_spacing_s_max=0.15,
             preview_spacing_error_gain=1.0,
             # Path-ahead clearance (static only)
-            path_clearance_num_samples=6,
-            path_clearance_spacing_s=0.05,
+            path_clearance_num=3,
             path_clearance_probe_radius=0.05,
-            path_clearance_safe=0.20,
+            path_clearance_safe=0.50,
             # Adaptive tube deadband
             tube_deadband_min=0.15,
-            tube_deadband_max=0.45,
+            tube_deadband_max=0.35,
             tube_deadband_gain=1.0,
             min_clearance_update_interval=4,
             # Virtual progress (s_hat) – MPCC-style lag/contouring gates
@@ -99,7 +98,7 @@ class CommandsCfg:
             # adherence.  Lag error is the primary brake; contouring error
             # only mildly slows s_hat so obstacle detours don't stall it.
             s_hat_initial_offset_s=0.05,
-            s_hat_nominal_speed_mps=1.00,
+            s_hat_nominal_speed_mps=0.70,
             s_hat_speed_max_mps=3.0,
             s_hat_filter_tau=0.08,
             s_hat_catchup_tau=0.06,
@@ -107,19 +106,19 @@ class CommandsCfg:
             s_hat_lag_deadband_m=0.30,
             s_hat_lag_sigma_m=0.45,
             # Contouring gate (mild influence): wide deadband + sigma + low power
-            s_hat_contouring_deadband_m=0.40,
-            s_hat_contouring_sigma_m=0.80,
+            s_hat_contouring_deadband_m=0.25,
+            s_hat_contouring_sigma_m=0.50,
             s_hat_contouring_gate_power=0.15,
             # Tail release (末段虚拟进度释放)
-            s_hat_tail_release_start_s=0.85,
+            s_hat_tail_release_start_s=0.90,
             s_hat_tail_release_start_dist_m=0.60,
-            s_hat_tail_nominal_floor_ratio=0.75,
+            s_hat_tail_nominal_floor_ratio=0.50,
             # Reward reference (s_ref)
-            ori_weight_switch_distance=0.30,
-            ori_weight_k=15.0,
-            # Base reachability (prioritized task reward)
+            ori_weight_switch_distance=0.40,
+            ori_weight_k=12.0,
+            # Base reachability (one-sided adaptive base participation)
             arm_workspace_radius=0.45,
-            base_switch_k=4.0,
+            base_switch_sigma_m=0.08,
             # Visualization
             debug_vis=False,
             vis_update_interval=5,
@@ -305,103 +304,16 @@ class ObservationsCfg:
 
     @configclass
     class CriticCfg(ObsGroup):
-        """Observations for critic network."""
+        """Privileged observations for critic network only.
 
-        base_lin_vel = ObsTerm(func=mdp.base_lin_vel, history_length=3)
-        base_ang_vel = ObsTerm(func=mdp.base_ang_vel, history_length=3)
+        With runner obs_groups:
+            "policy": ["policy"],
+            "critic": ["policy", "critic"],
 
-        joint_pos = ObsTerm(
-            func=mdp.joint_pos_rel,
-            params={"asset_cfg": UR_ARM_JOINT_CFG},
-            history_length=3,
-        )
-        joint_vel = ObsTerm(
-            func=mdp.joint_vel_rel,
-            params={"asset_cfg": UR_ARM_JOINT_CFG},
-            history_length=3,
-            clip=(-10.0, 10.0),
-        )
-
-        actions = ObsTerm(func=mdp.last_action, history_length=3, clip=(-10.0, 10.0))
-
-        ee_pose_b = ObsTerm(
-            func=mdp.ee_pose_b,
-            params={
-                "asset_cfg": SceneEntityCfg(
-                    "robot", body_names="ur_wrist_3_link"
-                )
-            },
-            history_length=1,
-        )
-
-        ee_traj_command = ObsTerm(
-            func=mdp.generated_commands,
-            params={"command_name": "ee_traj"},
-            history_length=1,
-        )
-
-        # Final goal pose in base frame (7 dim, no noise for critic)
-        final_goal_pose_b = ObsTerm(
-            func=mdp.ee_traj_final_goal_pose_b,
-            params={
-                "command_name": "ee_traj",
-                "asset_cfg": SceneEntityCfg("robot"),
-            },
-            history_length=1,
-        )
-
-        # Future refs q2..qN, relative pose chain (num_points * 6 dim)
-        preview_points = ObsTerm(
-            func=mdp.ee_traj_preview_points_b,
-            params={
-                "command_name": "ee_traj",
-                "asset_cfg": SceneEntityCfg("robot"),
-                "num_points": 3,
-            },
-            history_length=1,
-        )
-
-        sphere_distances = ObsTerm(
-            func=mdp.sphere_pointcloud_distance,
-            params={
-                "sensor_cfg": SceneEntityCfg("lidar"),
-                "asset_cfg": SceneEntityCfg("robot"),
-                "ground_clearance": 0.1,
-            },
-            history_length=1,
-        )
-
-        # Raw lidar range scan (num_rays dim, no noise for critic)
-        # lidar_scan = ObsTerm(
-        #     func=mdp.lidar_range_scan_flat,
-        #     params={
-        #         "sensor_cfg": SceneEntityCfg("lidar"),
-        #         "ground_clearance": 0.1,
-        #         "ray_subsample": 1,
-        #         "normalize": True,
-        #     },
-        #     history_length=1,
-        # )
-
-        # K nearest dynamic obstacles — 10D features (K*10 dim, no noise)
-        dyn_obstacles = ObsTerm(
-            func=mdp.dynamic_obstacles,
-            params={
-                "asset_cfg": SceneEntityCfg("robot"),
-                "obstacle_asset_names": DYN_ALL_NAMES,
-                "obstacle_sizes": DYN_ALL_SIZES,
-                "cuboid_names": DYN_CUBOID_NAMES,
-                "cylinder_names": DYN_CYLINDER_NAMES,
-                "cuboid_half_extents": CUBOID_HALF_EXTENTS,
-                "cylinder_params": CYLINDER_PARAMS,
-                "top_k": 5,
-                "max_range": 5.0,
-                "max_vel": 1.5,
-            },
-            history_length=1,
-        )
-
-        projected_gravity = ObsTerm(func=mdp.projected_gravity)
+        the critic already receives all PolicyCfg observations. Therefore this
+        group should only contain extra privileged terms that the actor does not
+        receive, instead of duplicating PolicyCfg terms.
+        """
 
         # Path progress features (3 dim, privileged): [s_hat, speed, 1-s_hat]
         progress_features = ObsTerm(
@@ -437,10 +349,16 @@ class RewardsCfg:
     Reward structure (prioritized base-arm + tube penalties):
       r = r_task + r_tube(s_proj) + r_obs + r_smooth + r_success
 
-      r_task = w_base * r_base + (1 - w_base) * r_arm
+      r_task = r_base + (1 - w_base) * r_arm
 
-      w_base = sigmoid(k * (rho_base - arm_workspace_radius))
+      w_base = 1 - exp(-(relu(rho_base - arm_workspace_radius) / sigma)^2)
+      → one-sided adaptive base participation: w_base = 0 inside the
+        arm comfort handoff radius, and rises smoothly only outside it.
       rho_base = ||p_ref_xy(s_ref) - p_base_xy||
+
+      r_base contains a w_base-gated delta approach term plus a positive
+      membership bonus exp(-relu(rho_base - radius) / std_base), which is 1
+      inside the radius and smoothly decays outside.
 
       r_arm  = alpha_p * delta_d_p  +  beta_p * gate * phi_p(d_p)
              + w_o(d_p) * (alpha_o * delta_d_o  +  beta_o * gate * phi_o(d_o))
@@ -461,7 +379,7 @@ class RewardsCfg:
 
     path_progress = RewTerm(
         func=mdp.path_progress_reward,
-        weight=20.0,
+        weight=4.0,
         params={
             "command_name": "ee_traj",
             "max_delta_s": 0.05,
@@ -474,7 +392,7 @@ class RewardsCfg:
 
     reference_position_approach = RewTerm(
         func=mdp.reference_position_approach_reward,
-        weight=8.0,
+        weight=4.0,
         params={
             "command_name": "ee_traj",
             "max_delta": 0.05,
@@ -483,10 +401,10 @@ class RewardsCfg:
 
     reference_position_tracking = RewTerm(
         func=mdp.reference_position_tracking_reward,
-        weight=4.0,
+        weight=8.0,
         params={
             "command_name": "ee_traj",
-            "std": 0.15,
+            "std": 0.12,
             "delta_s_norm": 0.01,
             "delta_g_norm": 0.01,
         },
@@ -494,7 +412,7 @@ class RewardsCfg:
 
     reference_orientation_approach = RewTerm(
         func=mdp.reference_orientation_approach_reward,
-        weight=3.0,
+        weight=1.0,
         params={
             "command_name": "ee_traj",
             "max_delta": 0.10,
@@ -503,10 +421,10 @@ class RewardsCfg:
 
     reference_orientation_tracking = RewTerm(
         func=mdp.reference_orientation_tracking_reward,
-        weight=1.5,
+        weight=3.0,
         params={
             "command_name": "ee_traj",
-            "std": 0.45,
+            "std": 0.35,
             "delta_s_norm": 0.01,
             "delta_g_norm": 0.01,
         },
@@ -516,7 +434,7 @@ class RewardsCfg:
 
     base_reachability_approach = RewTerm(
         func=mdp.base_reachability_approach_reward,
-        weight=8.0,
+        weight=3.0,
         params={
             "command_name": "ee_traj",
             "max_delta": 0.05,
@@ -525,10 +443,10 @@ class RewardsCfg:
 
     base_reachability_tracking = RewTerm(
         func=mdp.base_reachability_tracking_reward,
-        weight=4.0,
+        weight=2.0,
         params={
             "command_name": "ee_traj",
-            "arm_workspace_radius": 0.40,
+            "arm_workspace_radius": 0.45,
             "std_base": 0.10,
         },
     )
@@ -537,7 +455,7 @@ class RewardsCfg:
 
     final_goal_approach = RewTerm(
         func=mdp.final_goal_approach_reward,
-        weight=8.0,
+        weight=1.0,
         params={
             "command_name": "ee_traj",
             "max_delta": 0.05,
@@ -559,7 +477,7 @@ class RewardsCfg:
         weight=1.5,
         params={
             "command_name": "ee_traj",
-            "deadband": 0.50,
+            "deadband": 0.40,
         },
     )
 
@@ -567,27 +485,27 @@ class RewardsCfg:
 
     time_penalty = RewTerm(
         func=mdp.time_penalty,
-        weight=-0.08,
+        weight=-0.10,
     )
 
     # ===== Action Regularization =====
 
     arm_action_rate = RewTerm(
         func=mdp.arm_action_rate_l2,
-        weight=-0.06,
+        weight=-0.08,
     )
 
     base_action_rate = RewTerm(
         func=mdp.base_action_rate_l2,
-        weight=-0.08,
+        weight=-0.10,
     )
     arm_action_l2 = RewTerm(
         func=mdp.arm_action_l2,
-        weight=-0.008,
+        weight=-0.005,
     )
     base_action_l2 = RewTerm(
         func=mdp.base_action_l2,
-        weight=-0.025,
+        weight=-0.02,
     )
 
     # Base Stability — penalize aggressive motion and non-flat orientation
@@ -606,7 +524,7 @@ class RewardsCfg:
 
     goal_reached = RewTerm(
         func=mdp.goal_reached_bonus,
-        weight=200.0,
+        weight=150.0,
         params={
             "command_name": "ee_traj",
             "pos_tolerance": 0.15,
@@ -615,15 +533,15 @@ class RewardsCfg:
     )
 
     tipped_over_penalty = RewTerm(
-        func=mdp.is_terminated_term,
+        func=mdp.terminated_event_reward,
         weight=-200.0,
         params={"term_keys": ["tipped_over"]},
     )
 
     # penalty on geometric obstacle collision (lidar + collision spheres)
     obstacle_collision_penalty = RewTerm(
-        func=mdp.is_terminated_term,
-        weight=-20.0,
+        func=mdp.terminated_event_reward,
+        weight=-80.0,
         params={"term_keys": ["obstacle_collision"]},
     )
 
@@ -645,7 +563,7 @@ class RewardsCfg:
             "sensor_cfg": SceneEntityCfg("lidar"),
             "asset_cfg": SceneEntityCfg("robot"),
             "d_safe": 0.06,
-            "d_repulsion": 0.35,
+            "d_repulsion": 0.30,
             "repulsion_weight": 3.5,
             "hard_penalty": -2.0,
             "ground_clearance": 0.1,
@@ -654,17 +572,17 @@ class RewardsCfg:
 
     dynamic_obstacle_avoidance = RewTerm(
         func=mdp.dynamic_obstacle_cbf_reward,
-        weight=5.0,
+        weight=10.0,
         params={
             "obstacle_asset_names": DYN_ALL_NAMES,
             "cuboid_names": DYN_CUBOID_NAMES,
             "cylinder_names": DYN_CYLINDER_NAMES,
             "cuboid_half_extents": CUBOID_HALF_EXTENTS,
             "cylinder_params": CYLINDER_PARAMS,
-            "d_safe": 0.12,
-            "d_trigger": 1.00,
-            "t_react": 0.8,
-            "barrier_delta": 0.08,
+            "d_safe": 0.10,
+            "d_trigger": 0.60,
+            "t_react": 0.30,
+            "barrier_delta": 0.06,
             "barrier_mu": 0.05,
             "max_penalty": 2.0,
         },
@@ -672,7 +590,7 @@ class RewardsCfg:
     # base-line Reward
     # collision_avoidance = RewTerm(
     #     func=mdp.static_full_body_log_distance_reward,
-    #     weight=5.0,
+    #     weight=10.0,
     #     params={
     #         "sensor_cfg": SceneEntityCfg("lidar"),
     #         "asset_cfg": SceneEntityCfg("robot"),
@@ -686,7 +604,7 @@ class RewardsCfg:
 
     # dynamic_obstacle_avoidance = RewTerm(
     #     func=mdp.dynamic_full_body_log_distance_reward,
-    #     weight=5.0,
+    #     weight=10.0,
     #     params={
     #         "asset_cfg": SceneEntityCfg("robot"),
     #         "obstacle_asset_names": DYN_ALL_NAMES,
@@ -694,7 +612,7 @@ class RewardsCfg:
     #         "cylinder_names": DYN_CYLINDER_NAMES,
     #         "cuboid_half_extents": CUBOID_HALF_EXTENTS,
     #         "cylinder_params": CYLINDER_PARAMS,
-    #         "d_trigger": 1.0,
+    #         "d_trigger": 0.70,
     #         "eps": 1e-3,
     #         "max_penalty": 2.0,
     #         "aggregation": "max",
@@ -719,7 +637,16 @@ class TerminationsCfg:
     obstacle avoidance should not end the episode.
     """
 
-    time_out = DoneTerm(func=mdp.time_out, time_out=True)
+    time_out = DoneTerm(
+        func=mdp.proportional_time_out,
+        time_out=True,
+        params={
+            "command_name": "ee_traj",
+            "nominal_speed": 1.0,
+            "safety_factor": 4.0,
+            "min_timeout_s": 20.0,
+        },
+    )
 
     # Success: EE reached the global sampled goal / path endpoint.
     goal_reached = DoneTerm(
@@ -746,6 +673,30 @@ class TerminationsCfg:
             "static_collision_margin": 0.05,
             "dynamic_collision_margin": 0.05,
             "ground_clearance": 0.1,
+            "cuboid_names": DYN_CUBOID_NAMES,
+            "cylinder_names": DYN_CYLINDER_NAMES,
+            "cuboid_half_extents": CUBOID_HALF_EXTENTS,
+            "cylinder_params": CYLINDER_PARAMS,
+        },
+        time_out=False,
+    )
+
+    static_obstacle_collision = DoneTerm(
+        func=mdp.static_obstacle_collision,
+        params={
+            "sensor_cfg": SceneEntityCfg("lidar"),
+            "asset_cfg": SceneEntityCfg("robot"),
+            "static_collision_margin": 0.05,
+            "ground_clearance": 0.1,
+        },
+        time_out=False,
+    )
+
+    dynamic_obstacle_collision = DoneTerm(
+        func=mdp.dynamic_obstacle_collision,
+        params={
+            "asset_cfg": SceneEntityCfg("robot"),
+            "dynamic_collision_margin": 0.05,
             "cuboid_names": DYN_CUBOID_NAMES,
             "cylinder_names": DYN_CYLINDER_NAMES,
             "cuboid_half_extents": CUBOID_HALF_EXTENTS,
@@ -794,8 +745,8 @@ class EventCfg:
         mode="reset",
         params={
             "safe_radius": 2.0,
-            "cuboid_hover_range": (0.6, 1.0),
-            "vel_range": (0.5, 1.0),
+            "cuboid_hover_range": (0.7, 1.0),
+            "vel_range": (0.5, 1.5),
             "local_range": (5.0, 5.0, 1.0),
             "write_to_sim": False,
         },
@@ -809,8 +760,8 @@ class EventCfg:
             "local_range": (5.0, 5.0, 1.0),
             "goal_reach_threshold": 0.5,
             "vel_resample_interval": 2.0,
-            "vel_range": (0.5, 1.0),
-            "cuboid_hover_range": (0.6, 1.0),
+            "vel_range": (0.5, 1.5),
+            "cuboid_hover_range": (0.7, 1.0),
             "goal_check_interval_s": 0.10,
             "goal_timeout_s": 4.0,
             "write_to_sim": False,
@@ -845,35 +796,35 @@ class CurriculumCfg:
     # Difficulty changes by ±difficulty_step per evaluation window.
     # Driven by success/collision/tip rates (NOT quality-rate).
     # =========================================================================
-    dynamic_obstacles = CurrTerm(
-        func=mdp.dynamic_obstacle_curriculum,
-        params={
-            "max_active": NUM_DYN_TOTAL,
-            "difficulty_step": 5,
-            "command_name": "ee_traj",
-            # Success = EE reached global sampled goal
-            "goal_pos_tolerance": 0.15,
-            "goal_ori_tolerance": 0.30,
-            # Upgrade thresholds
-            "move_up_success_rate": 0.85,
-            "move_up_collision_rate": 0.15,
-            "move_up_tip_rate": 0.01,
-            # Downgrade thresholds
-            "move_down_success_rate": 0.50,
-            "move_down_collision_rate": 0.20,
-            "move_down_tip_rate": 0.03,
-            # Ring buffer
-            "window_size": 8000,
-            # Warmup
-            "warmup_min_samples": 2000,
-            "warmup_min_adjust_samples": 4000,
-            # Evaluation interval (samples)
-            "adjust_every_samples": 8000,
-            # Hysteresis: consecutive windows needed
-            "up_hold_windows": 3,
-            "down_hold_windows": 3,
-        },
-    )
+    # dynamic_obstacles = CurrTerm(
+    #     func=mdp.dynamic_obstacle_curriculum,
+    #     params={
+    #         "max_active": NUM_DYN_TOTAL,
+    #         "difficulty_step": 5,
+    #         "command_name": "ee_traj",
+    #         # Success = EE reached global sampled goal
+    #         "goal_pos_tolerance": 0.15,
+    #         "goal_ori_tolerance": 0.30,
+    #         # Upgrade thresholds
+    #         "move_up_success_rate": 0.85,
+    #         "move_up_collision_rate": 0.13,
+    #         "move_up_tip_rate": 0.01,
+    #         # Downgrade thresholds
+    #         "move_down_success_rate": 0.75,
+    #         "move_down_collision_rate": 0.20,
+    #         "move_down_tip_rate": 0.03,
+    #         # Ring buffer
+    #         "window_size": 8000,
+    #         # Warmup
+    #         "warmup_min_samples": 2000,
+    #         "warmup_min_adjust_samples": 4000,
+    #         # Evaluation interval (samples)
+    #         "adjust_every_samples": 8000,
+    #         # Hysteresis: consecutive windows needed
+    #         "up_hold_windows": 3,
+    #         "down_hold_windows": 3,
+    #     },
+    # )
 
 
 @configclass
@@ -923,7 +874,7 @@ class MMEeTrajTrackingEnvCfg_PLAY(MMEeTrajTrackingEnvCfg):
 
         # ===== Command Settings =====
         self.commands.ee_traj.ranges_pos = {
-            "rho_xy": (7.0, 15.0),
+            "rho_xy": (10.0, 15.0),
             "yaw": (-3 * PI / 5, 3 * PI / 5),
         }
         self.commands.ee_traj.z_range = (0.6, 0.8)

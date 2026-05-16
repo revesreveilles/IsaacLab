@@ -47,6 +47,7 @@ from isaaclab.utils.math import (
     axis_angle_from_quat,
     combine_frame_transforms,
     compute_pose_error,
+    quat_apply,
     quat_from_angle_axis,
     quat_from_euler_xyz,
     quat_mul,
@@ -131,10 +132,14 @@ class EETrajectoryCommandCfg(CommandTermCfg):
     """Gain for shrinking spacing with contouring error."""
 
     # --- Path-ahead clearance (static only) ---
-    path_clearance_num_samples: int = 6
-    """Number of sample points along nominal path ahead for clearance."""
-    path_clearance_spacing_s: float = 0.04
-    """Spacing in s-units between clearance sample points."""
+    path_clearance_num: int = 1
+    """Number of future preview points used for static clearance.
+
+    The clearance query starts from q2, i.e. preview_pos_w[:, 1].
+    path_clearance_num=1 checks q2 only.
+    path_clearance_num=2 checks q2 and q3.
+    The value is clamped by num_preview_points - 1.
+    """
     path_clearance_probe_radius: float = 0.05
     """Probe sphere radius subtracted from point cloud distance."""
     path_clearance_safe: float = 0.20
@@ -147,7 +152,7 @@ class EETrajectoryCommandCfg(CommandTermCfg):
     """Maximum contouring tube deadband (m)."""
     tube_deadband_gain: float = 1.0
     """Gain for expanding deadband when clearance is low."""
-    min_clearance_update_interval: int = 4
+    min_clearance_update_interval: int = 5
     """Update interval in simulation steps for logging-only min_clearance."""
 
     # --- Virtual progress (s_hat) ---
@@ -190,12 +195,15 @@ class EETrajectoryCommandCfg(CommandTermCfg):
     ori_weight_k: float = 20.0
     """Sigmoid steepness for orientation weight gating."""
 
-    # --- Base reachability (prioritized task reward) ---
-    arm_workspace_radius: float = 0.55
-    """Effective planar workspace radius (m) of the arm.
-    Serves as the sigmoid switching centre for base-vs-arm task weight."""
+    # --- Base reachability (one-sided adaptive base participation) ---
+    arm_workspace_radius: float = 0.45
+    """Comfort handoff radius (m) where the arm fully dominates the task.
+    The base is encouraged to move the reference into this radius; it is not
+    treated as the arm's hard physical reach limit."""
+    base_switch_sigma_m: float = 0.10
+    """Distance scale (m) for re-engaging base participation outside the arm handoff radius."""
     base_switch_k: float = 12.0
-    """Sigmoid steepness for base/arm weight transition."""
+    """Deprecated: sigmoid switching is disabled; kept for config compatibility."""
 
     # Visualization
     debug_vis: bool = False
@@ -474,21 +482,15 @@ class EETrajectoryCommand(CommandTerm):
         self._preview_quat_w = torch.zeros(N, P, 4, device=self.device)
         self._preview_quat_w[:, :, 0] = 1.0
         self._preview_step_offsets = torch.arange(P, device=self.device, dtype=torch.float32).unsqueeze(0)
-        clearance_steps = torch.arange(
-            1, cfg.path_clearance_num_samples + 1, device=self.device, dtype=torch.float32
-        )
-        self._path_clearance_step_offsets = (
-            clearance_steps * cfg.path_clearance_spacing_s
-        ).unsqueeze(0)
 
         # Path-ahead clearance / adaptive tube
         self._path_ahead_clearance = torch.full((N,), 1.0, device=self.device)
         self._tube_deadband_dynamic = torch.full((N,), cfg.tube_deadband_min, device=self.device)
-        self._path_clearance_query_s = torch.zeros(
-            N, cfg.path_clearance_num_samples, device=self.device
+        max_clearance_k = max(
+            1, min(cfg.path_clearance_num, max(cfg.num_preview_points - 1, 1))
         )
         self._path_clearance_values = torch.full(
-            (N, cfg.path_clearance_num_samples), 1e6, device=self.device
+            (N, max_clearance_k), 1e6, device=self.device
         )
 
         # Reward reference (s_ref based)
@@ -1434,10 +1436,13 @@ class EETrajectoryCommand(CommandTerm):
         self._prev_orientation_error.copy_(d_o)
         self._has_prev_ref_error.fill_(True)
 
-        # 12. Base reachability: rho_base
-        base_pos_xy = self.robot.data.root_pos_w[:, :2]
+        # 12. Arm-base reachability: rho_base
+        root_pos_w = self.robot.data.root_pos_w
+        root_quat_w = self.robot.data.root_quat_w
+        offset_b = self._arm_base_offset.unsqueeze(0).expand(root_pos_w.shape[0], -1)
         ref_pos_xy = pos_w[:, :2]
-        rho_base = (ref_pos_xy - base_pos_xy).norm(dim=-1)
+        arm_mount_w = root_pos_w + quat_apply(root_quat_w, offset_b)
+        rho_base = (ref_pos_xy - arm_mount_w[:, :2]).norm(dim=-1)
 
         self._rho_base_delta.copy_(self._prev_rho_base)
         self._rho_base_delta.sub_(rho_base)
@@ -1446,17 +1451,20 @@ class EETrajectoryCommand(CommandTerm):
         self._rho_base.copy_(rho_base)
         self._has_prev_rho_base.fill_(True)
 
-        self._base_task_weight.copy_(rho_base)
-        self._base_task_weight.sub_(cfg.arm_workspace_radius)
-        self._base_task_weight.mul_(cfg.base_switch_k)
-        self._base_task_weight.sigmoid_()
+        # One-sided adaptive base participation:
+        # inside the arm comfort radius the base weight is exactly zero;
+        # outside it rises smoothly with the excess reachability distance.
+        excess = torch.relu(rho_base - cfg.arm_workspace_radius)
+        sigma = max(cfg.base_switch_sigma_m, 1e-6)
+        self._base_task_weight.copy_(
+            1.0 - torch.exp(-torch.square(excess / sigma))
+        )
+        self._base_task_weight.clamp_(0.0, 1.0)
 
         # 13. Store reference pose from q1
         self.pose_command_w[:, :3] = pos_w
         self.pose_command_w[:, 3:7] = quat_unique(quat_w)
 
-        root_pos_w = self.robot.data.root_pos_w
-        root_quat_w = self.robot.data.root_quat_w
         cmd_pos_b, cmd_quat_b = subtract_frame_transforms(
             root_pos_w, root_quat_w, pos_w, quat_w
         )
@@ -1468,50 +1476,63 @@ class EETrajectoryCommand(CommandTerm):
     # -----------------------------------------------------------------
 
     def _compute_path_ahead_clearance(self):
-        """Compute minimum static clearance along nominal path ahead of s_hat.
+        """Compute static clearance at future preview points.
 
-        Uses the valid_hits cache from sphere_lidar if available, plus the
-        static obstacle height grid for collision-inside checks.
+        This is a lightweight approximation of path-ahead clearance.
+        Instead of sampling extra points along the nominal path, we directly
+        reuse the already computed preview stack.
+
+        q1 = preview_pos_w[:, 0] is the current reference and is not used here.
+        The query points start from q2 = preview_pos_w[:, 1].
+        cfg.path_clearance_num controls how many future preview points are checked.
         """
         cfg = self.cfg
-        K = cfg.path_clearance_num_samples
+        num_preview = self._preview_pos_w.shape[1]
 
-        if K <= 0:
+        if num_preview <= 0:
             self._path_ahead_clearance.fill_(10.0)
             return
 
-        # Sample K points along nominal path ahead
-        self._path_clearance_query_s.copy_(self._path_clearance_step_offsets)
-        self._path_clearance_query_s.add_(self._s_hat.unsqueeze(1))
-        self._path_clearance_query_s.clamp_(0.0, 1.0)
+        # Prefer future preview points q2..qN.
+        # If only q1 exists, fallback to q1.
+        if num_preview == 1:
+            query_pos = self._preview_pos_w[:, 0:1, :]  # [E, 1, 3]
+            K = 1
+        else:
+            K = min(max(int(cfg.path_clearance_num), 1), num_preview - 1)
+            query_pos = self._preview_pos_w[:, 1 : 1 + K, :]  # [E, K, 3]
 
-        query_pos = self.get_path_positions_at_s(self._path_clearance_query_s)  # [N, K, 3]
-
-        # Try to get valid_hits from sphere_lidar cache.
         clearances = self._path_clearance_values
-        clearances.fill_(1e6)
+
+        # In case config changes num_preview/path_clearance_num, only use the active slice.
+        clearances_active = clearances[:, :K]
+        clearances_active.fill_(1e6)
+
+        # Sphere-lidar nearest static hit distance.
         sphere_lidar_cache, compute_sphere_lidar = self._get_sphere_lidar_helpers()
         if sphere_lidar_cache is not None and compute_sphere_lidar is not None:
             cache_key = id(self._env)
             cached = sphere_lidar_cache.get(cache_key)
             if cached is None or cached.get("_step") != self._env.common_step_counter:
                 cached = compute_sphere_lidar(self._env)
+
             if cached is not None and "valid_hits" in cached:
                 valid_hits = cached["valid_hits"]  # [E, R', 3]
                 if valid_hits.shape[1] > 0:
                     dists = torch.cdist(query_pos, valid_hits)  # [E, K, R']
-                    min_dists = dists.min(dim=-1).values  # [E, K]
-                    clearances.copy_(min_dists)
-                    clearances.sub_(cfg.path_clearance_probe_radius)
+                    min_dists = dists.min(dim=-1).values        # [E, K]
+                    clearances_active.copy_(min_dists)
+                    clearances_active.sub_(cfg.path_clearance_probe_radius)
 
-        # Override with 0 where height grid says inside obstacle
+        # Override with 0 where the static height grid says the preview point is inside obstacle.
         if self._has_height_grid:
             collides = self._check_obstacle_collision(
                 query_pos.reshape(-1, 3)
             ).reshape(self.num_envs, K)
-            clearances.masked_fill_(collides, 0.0)
+            clearances_active.masked_fill_(collides, 0.0)
 
-        self._path_ahead_clearance.copy_(clearances.min(dim=-1).values)
+        # path_ahead_clearance remains the minimum over the selected future preview points.
+        self._path_ahead_clearance.copy_(clearances_active.min(dim=-1).values)
         self._path_ahead_clearance.clamp_(0.0, 10.0)
 
     def _compute_min_clearance(self):

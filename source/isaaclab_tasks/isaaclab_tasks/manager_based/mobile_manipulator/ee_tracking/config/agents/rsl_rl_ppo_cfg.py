@@ -32,7 +32,7 @@ class MobileManipulatorPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
     # ========== Runner Settings ==========
     num_steps_per_env = 24
-    max_iterations = 10000
+    max_iterations = 5000
     save_interval = 500
     experiment_name = "mm_ee_tracking"
     empirical_normalization = True
@@ -43,7 +43,7 @@ class MobileManipulatorPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
     # ========== Policy Network ==========
     policy = RslRlPpoActorCriticCfg(
-        init_noise_std=1.0,
+        init_noise_std=0.6,
 
         # Actor network
         actor_hidden_dims=[512, 256, 128],
@@ -56,14 +56,14 @@ class MobileManipulatorPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     # ========== PPO Algorithm ==========
     algorithm = RslRlPpoAlgorithmCfg(
         # PPO hyperparameters
-        value_loss_coef=1.0,
+        value_loss_coef=0.5,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.01,
+        entropy_coef=0.001,
         num_learning_epochs=5,
         num_mini_batches=4,
         # Learning rate
-        learning_rate=1e-3,
+        learning_rate=5e-4,
         schedule="adaptive",
         # GAE parameters
         gamma=0.99,

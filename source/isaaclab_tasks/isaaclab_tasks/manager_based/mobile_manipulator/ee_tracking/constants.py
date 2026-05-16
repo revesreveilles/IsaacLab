@@ -40,7 +40,7 @@ PI = math.pi
 # Dynamic Obstacle Registry
 # ==============================================================================
 # Number per category
-NUM_DYN_TOTAL = 60
+NUM_DYN_TOTAL = 120
 NUM_DYN_CUBOIDS = int(NUM_DYN_TOTAL * 0.6)
 NUM_DYN_CYLINDERS = NUM_DYN_TOTAL - NUM_DYN_CUBOIDS
 

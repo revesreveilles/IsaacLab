@@ -21,6 +21,23 @@ from isaaclab_tasks.manager_based.mobile_manipulator.ee_tracking.constants impor
 )
 
 
+def _delta_reward_rate(
+    env: ManagerBasedRLEnv,
+    delta: torch.Tensor,
+    min_delta: float,
+    max_delta: float,
+) -> torch.Tensor:
+    """Return delta as a rate so RewardManager dt integration recovers delta."""
+    step_dt = max(float(getattr(env, "step_dt", 1.0)), 1e-8)
+    return delta.clamp(min_delta, max_delta) / step_dt
+
+
+def _event_reward_rate(env: ManagerBasedRLEnv, event: torch.Tensor) -> torch.Tensor:
+    """Return event indicator as a rate so one-shot weights are preserved."""
+    step_dt = max(float(getattr(env, "step_dt", 1.0)), 1e-8)
+    return event.float() / step_dt
+
+
 # ====================
 # Action Regularization
 # ====================
@@ -188,7 +205,7 @@ def reference_position_approach_reward(
     command_term = env.command_manager.get_term(command_name)
     delta = command_term.metrics["position_progress_delta"]
     w_arm = 1.0 - command_term._base_task_weight
-    return w_arm * delta.clamp(-max_delta, max_delta)
+    return w_arm * _delta_reward_rate(env, delta, -max_delta, max_delta)
 
 
 def _local_reward_progress_gate(
@@ -266,7 +283,7 @@ def reference_orientation_approach_reward(
     cfg = command_term.cfg
     w_o = torch.sigmoid(cfg.ori_weight_k * (cfg.ori_weight_switch_distance - d_p))
     w_arm = 1.0 - command_term._base_task_weight
-    return w_arm * w_o * delta.clamp(-max_delta, max_delta)
+    return w_arm * w_o * _delta_reward_rate(env, delta, -max_delta, max_delta)
 
 
 def reference_orientation_tracking_reward(
@@ -294,17 +311,25 @@ def reference_orientation_tracking_reward(
 
 
 # ================================================================
-# Base Reachability Rewards (prioritized task reward)
+# Reachability-Gated Base Participation Rewards
 # ================================================================
 #
-# rho_base = ||p_ref_xy(s_ref) - p_base_xy||
+# rho_base = ||p_ref_xy(s_ref) - p_arm_mount_xy||
 #
 # r_base = alpha_b * base_reachability_approach_reward
 #        + beta_b  * base_reachability_tracking_reward
 #
-# w_base = sigmoid(k * (rho_base - arm_workspace_radius))
+# excess = relu(rho_base - arm_workspace_radius)
+# w_base = 1 - exp(-(excess / base_switch_sigma_m)^2)
 #
-# r_task = w_base * r_base + (1 - w_base) * r_arm
+# Therefore:
+# - rho_base <= arm_workspace_radius: w_base = 0, arm rewards dominate.
+# - rho_base > arm_workspace_radius: w_base rises smoothly with excess reach.
+#
+# The approach term is multiplied by w_base. The tracking term is a positive
+# workspace-membership bonus: it is 1 inside the comfort radius and decays
+# outside it. Multiplying that bonus by w_base creates an unintended reward
+# shell just outside the radius.
 # ================================================================
 
 
@@ -323,7 +348,7 @@ def base_reachability_approach_reward(
     command_term = env.command_manager.get_term(command_name)
     delta = command_term._rho_base_delta
     w_base = command_term._base_task_weight
-    return w_base * delta.clamp(-max_delta, max_delta)
+    return w_base * _delta_reward_rate(env, delta, -max_delta, max_delta)
 
 
 def base_reachability_tracking_reward(
@@ -332,22 +357,19 @@ def base_reachability_tracking_reward(
     arm_workspace_radius: float = 0.55,
     std_base: float = 0.10,
 ) -> torch.Tensor:
-    """Static shaping reward for base reachability.
+    """Positive reachability membership bonus for the base-arm handoff.
 
-    Indicates whether the current active gate is within the arm's effective
-    planar workspace.
+    Inside the arm comfort radius this returns 1.0, giving no gradient to move
+    the base closer than necessary. Outside the radius it smoothly decays with
+    excess reachability distance. This keeps the reward positive while avoiding
+    the old shell-shaped optimum from w_base * exp(-excess / std_base).
 
     Returns exp(-relu(rho_base - arm_workspace_radius) / std_base).
-    Value is 1.0 when rho_base <= arm_workspace_radius and decays
-    exponentially when the reference is outside the workspace.
-
-    Math:  beta_b * exp(-relu(rho_base - R_arm) / std_base)
     """
     command_term = env.command_manager.get_term(command_name)
     rho = command_term._rho_base
     excess = torch.relu(rho - arm_workspace_radius)
-    w_base = command_term._base_task_weight
-    return w_base * torch.exp(-excess / max(std_base, 1e-6))
+    return torch.exp(-excess / max(std_base, 1e-6))
 
 
 # ================================================================
@@ -368,7 +390,7 @@ def path_progress_reward(
     """
     command_term = env.command_manager.get_term(command_name)
     delta = command_term._robot_progress_delta
-    return delta.clamp(-max_delta_s, max_delta_s)
+    return _delta_reward_rate(env, delta, -max_delta_s, max_delta_s)
 
 
 # ================================================================
@@ -420,33 +442,6 @@ def time_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
     """
     return torch.ones(env.scene.num_envs, device=env.device)
 
-
-# ================================================================
-# Fixed Via-Point Route Guidance Rewards
-# ================================================================
-
-def route_contouring_tube_penalty(
-    env: ManagerBasedRLEnv,
-    command_name: str,
-    deadband: float = 0.25,
-) -> torch.Tensor:
-    """Contouring tube penalty around the current segment projection point."""
-    command_term = env.command_manager.get_term(command_name)
-    e = command_term.metrics["contouring_error"]
-    return -(torch.relu(e - deadband) ** 2)
-
-
-def route_orientation_tube_penalty(
-    env: ManagerBasedRLEnv,
-    command_name: str,
-    deadband: float = 0.50,
-) -> torch.Tensor:
-    """Orientation tube penalty around the current segment projection pose."""
-    command_term = env.command_manager.get_term(command_name)
-    e = command_term.metrics["path_orientation_error"]
-    return -(torch.relu(e - deadband) ** 2)
-
-
 # ================================================================
 
 def orientation_tube_penalty(
@@ -483,7 +478,23 @@ def goal_reached_bonus(
         ori_error = command_term.metrics["final_orientation_error"]
         reached = reached & (ori_error < ori_tolerance)
 
-    return reached.float()
+    return _event_reward_rate(env, reached)
+
+
+def terminated_event_reward(
+    env: ManagerBasedRLEnv,
+    term_keys: list[str],
+) -> torch.Tensor:
+    """One-shot termination event reward for non-timeout termination terms."""
+    event = torch.zeros(env.scene.num_envs, dtype=torch.bool, device=env.device)
+    for key in term_keys:
+        event = event | env.termination_manager.get_term(key)
+
+    time_outs = getattr(env.termination_manager, "time_outs", None)
+    if time_outs is not None:
+        event = event & (~time_outs)
+
+    return _event_reward_rate(env, event)
 
 
 # ====================
@@ -524,28 +535,15 @@ def collision_avoidance_reward(
     Returns:
         torch.Tensor: shape [num_envs], sum of per-sphere rewards.
     """
-    from .observations import (
-        _sphere_lidar_cache,
-        _compute_sphere_lidar,
+    from .observations import _compute_sphere_lidar
+
+    cache = _compute_sphere_lidar(
+        env,
+        sensor_cfg.name,
+        asset_cfg.name,
+        ground_clearance,
     )
-
-    # ── 复用 obs 已计算的缓存 (同步骤内) ──
-    cache_key = id(env)
-    if cache_key in _sphere_lidar_cache:
-        cache = _sphere_lidar_cache[cache_key]
-    else:
-        cache = _compute_sphere_lidar(
-            env, sensor_cfg.name, asset_cfg.name,
-            ground_clearance,
-        )
-
-    all_dist = cache["all_dist"]         # [E, S, R'] center distances
-    radii = cache["sphere_radii"]        # [S]
-
-    # 1. 每个 sphere 到所有 lidar 点的表面距离，取最小值
-    radii_exp = radii[None, :, None]     # [1, S, 1]
-    d_ln = all_dist - radii_exp          # [E, S, R']
-    d_surface = d_ln.min(dim=-1).values  # [E, S]
+    d_surface = cache["d_surface"]  # [E, S], signed surface clearance
 
     # 2. 计算侵入排斥区的深度
     penetration_depth = (d_repulsion - d_surface).clamp(min=0)
@@ -553,10 +551,11 @@ def collision_avoidance_reward(
     # 3. 双阈值指数奖励
     #   d_surface > d_safe: exp(-w * penetration_depth) - 1  (safe 区 → 0, 排斥区 → 平滑惩罚)
     #   d_surface <= d_safe: hard_penalty
+    hard_value = d_surface.new_full((), float(hard_penalty))
     reward_per_sphere = torch.where(
         d_surface > d_safe,
         torch.exp(-repulsion_weight * penetration_depth) - 1.0,
-        torch.tensor(hard_penalty, device=env.device),
+        hard_value,
     )
 
     # sum over all spheres → [E]
@@ -889,7 +888,7 @@ def timeout_terminal_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
     Returns 1.0 for envs where the 'time_out' termination term fired
     on this step, 0.0 otherwise.
     """
-    return env.termination_manager.get_term("time_out").float()
+    return _event_reward_rate(env, env.termination_manager.get_term("time_out"))
 
 
 # ================================================================
@@ -913,4 +912,4 @@ def final_goal_approach_reward(
     """
     command_term = env.command_manager.get_term(command_name)
     delta = command_term._final_goal_progress_delta
-    return delta.clamp(-max_delta, max_delta)
+    return _delta_reward_rate(env, delta, -max_delta, max_delta)
